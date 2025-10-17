@@ -59,4 +59,4 @@ Store: https://www.pandapi3d.com/product-page/bdpressure
 
 video: [test video](https://youtu.be/zLuWcR-ahno) ; [mount with bambu hotend](https://youtu.be/fwx00GEvlms)
 
-Discord:  [3D Printscape](https://discord.com/channels/804253067784355863/1403863863367176312)
+Discord:  [3D Printscape](https://discord.gg/xn5rYHyE)
