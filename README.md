@@ -2,23 +2,19 @@
 
 ### Features:
 
-#### 1. Automated Pressure Advanced Calibration
-
-#### 2. Nozzle Probe
-
-#### 3. All in one: No external PCB board, USB/I2C
+1. Automated Pressure Advanced Calibration
+2. Nozzle Probe
+3. All in one: No external PCB board, USB/I2C
 
 <img src="https://static.wixstatic.com/media/0d0edf_5b07659015334f90863ce9a552a895fd~mv2.jpg/v1/fill/w_1167,h_554,al_c,q_85/0d0edf_5b07659015334f90863ce9a552a895fd~mv2.jpg" width='800'>
-<img src="https://static.wixstatic.com/media/0d0edf_1ebb592e9ab04beeacb07abdf56b3e41~mv2.jpg/v1/fill/w_1658,h_1604,al_c,q_85,usm_0.66_1.00_0.01/0d0edf_1ebb592e9ab04beeacb07abdf56b3e41~mv2.jpg" width='800'>
+
+
 #### How it works?
-
 1. PA Mode:
- 
-    Automated Pressure Advanced Calibration. Without printing calibration lines, it just simulate extrusion pressure behavior during acceleration and deceleration while only the extruder is working. This work process is similar to the Bambu Lab A1 printer, instead, we use  strain gauge, not eddy sensor.
-
+ Without printing calibration lines, it just simulate extrusion pressure behavior during acceleration and deceleration while only the extruder is working. This work process is similar to the Bambu Lab A1 printer, instead, I use  strain gauge, not eddy sensor.
 2. Nozzle Probe Mode:
-
-     Use the strain gauge to sense the nozzle pressure while probing.It works as a normal switch endstop sensor, so we can just power it and connect the Z- pin on the mainboard. 
+ Use the strain gauge to sense the nozzle pressure while probing.It works as a normal switch endstop sensor, so we can just power it and connect the Z- pin on the mainboard. 
+<img src="https://static.wixstatic.com/media/0d0edf_1ebb592e9ab04beeacb07abdf56b3e41~mv2.jpg/v1/fill/w_1658,h_1604,al_c,q_85,usm_0.66_1.00_0.01/0d0edf_1ebb592e9ab04beeacb07abdf56b3e41~mv2.jpg" width='800'>
 
 ### klipper 
 
