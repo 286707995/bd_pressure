@@ -48,8 +48,6 @@ G1 X240 Y240           ; Move to the poop position. You can modify it depending 
 PA_CALIBRATE NOZZLE_TEMP=[first_layer_temperature] MAX_VOLUMETRIC=[filament_max_volumetric_speed] ACC_WALL=[outer_wall_acceleration]  TRAVEL_SPEED=[travel_speed]  ACC_TO_DECEL_FACTOR=[accel_to_decel_factor]
 ```
 
-####  Compatible:   
-It is compatible with most hotends, but need to design a mount with CAD for different hotend.
 
 ### others
 Store: https://www.pandapi3d.com/product-page/bdpressure
