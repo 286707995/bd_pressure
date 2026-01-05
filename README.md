@@ -5,7 +5,7 @@ As we know, different filaments, printing speeds, temperatures, etc. have differ
 
 1. Automated Pressure Advanced Calibration
 2. Nozzle Probe
-3. All in one: No external PCB board, USB/I2C,Compatible with E3D voron printer
+3. All in one: No external PCB board, USB/I2C,Compatible with E3D/Voron printer
 
 <img src="https://static.wixstatic.com/media/0d0edf_5b07659015334f90863ce9a552a895fd~mv2.jpg/v1/fill/w_1167,h_554,al_c,q_85/0d0edf_5b07659015334f90863ce9a552a895fd~mv2.jpg" width='800'>
 
