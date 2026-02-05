@@ -1,7 +1,7 @@
 # BD_Pressure
 As we know, different filaments, printing speeds, temperatures, etc. have different PA values that affect print quality significantly. Until now, very few printers on the market have automated PA calibration; many still require manual calibration, which is time-consuming and not everyone can do.
 
-<img src="https://static.wixstatic.com/media/0d0edf_aa2d24e17c1e4e79a38509f02f5e2e86~mv2.png/v1/fill/w_980,h_473,al_c,q_90,usm_0.66_1.00_0.01,enc_avif,quality_auto/0d0edf_aa2d24e17c1e4e79a38509f02f5e2e86~mv2.png" width='800'>
+<img src="https://static.wixstatic.com/media/0d0edf_f6d3465971184537b12e430bce7a0aea~mv2.jpg/v1/fill/w_841,h_758,al_c,q_85,usm_0.66_1.00_0.01/0d0edf_f6d3465971184537b12e430bce7a0aea~mv2.jpg" width='800'>
 <img src="https://static.wixstatic.com/media/0d0edf_eee5984961de44a7bad4c91010afd43b~mv2.jpg/v1/crop/x_10,y_43,w_1744,h_886/fill/w_846,h_430,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/vsV.jpg" width =800>
 
 ### Features:
@@ -26,4 +26,4 @@ Store: [Pandapi3d](https://www.pandapi3d.com/product-page/bdpressuree)  、 [淘
 
 [Youtube](https://youtu.be/6vDijDzVqsA) 
 
-Discord:  [3D Printscape](https://discord.com/channels/804253067784355863/1403863863367176312)
+Discord:  [3D Printscape](https://discord.gg/3PjCrGgvQ2)
