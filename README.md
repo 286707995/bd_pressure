@@ -26,4 +26,4 @@ Store: [Pandapi3d](https://www.pandapi3d.com/product-page/bdpressuree)  、 [淘
 
 [Youtube](https://youtu.be/6vDijDzVqsA) 
 
-Discord:  [3D Printscape](https://discord.gg/3PjCrGgvQ2)
+Discord: https://discord.gg/z6ahddnGVU 
