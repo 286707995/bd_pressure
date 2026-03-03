@@ -312,12 +312,12 @@ class BD_Pressure_Advance:
             min_s = self.PA_data[-1]  
             min_index = len(self.PA_data)-1
             for index, s_pa in enumerate(reversed(self.PA_data)):
-                if s_pa[4]<10:
+                if s_pa[4]<5:
                     min_index=len(self.PA_data)-1-index
                     break
             if min_index == len(self.PA_data)-1:
                 for index, s_pa in enumerate(reversed(self.PA_data)):
-                    if s_pa[5]<10:
+                    if s_pa[5]<5:
                         min_index=len(self.PA_data)-1-index
                         break   
             if  min_index == len(self.PA_data)-1:
