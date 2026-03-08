@@ -10,7 +10,7 @@ from . import filament_switch_sensor
 
 
 BDP_CHIP_ADDR = 4
-BDP_I2C_SPEED = 100000
+BDP_I2C_SPEED = 10000
 BDP_REGS = {
      '_version' : 0x0,
      '_measure_data' : 15,
@@ -69,7 +69,8 @@ class BD_Pressure_Advance:
             self.usb.write((str(self.thrhold)+';').encode())
            # response += self.usb.readline().decode('utf-8').strip()
         elif "i2c" == self.port: 
-           # response += self.read_register('_version', 15).decode('utf-8')
+          #  response += self.read_register('_version', 15).decode('utf-8')
+          #  self.gcode.respond_info("%s "%(response))
             #self.write_register('endstop_thr',6)
             self.write_register('pa_probe_mode',2)
             self.write_register('probe_thr',self.thrhold)
