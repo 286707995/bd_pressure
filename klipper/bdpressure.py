@@ -10,7 +10,7 @@ from . import filament_switch_sensor
 
 
 BDP_CHIP_ADDR = 4
-BDP_I2C_SPEED = 10000
+BDP_I2C_SPEED = 100000  # 原代码此处少个0，修正为100000（I2C标准速度）
 BDP_REGS = {
      '_version' : 0x0,
      '_measure_data' : 15,
@@ -34,15 +34,12 @@ class BD_Pressure_Advance:
         self.reactor = self.printer.get_reactor()
         self.port = config.get("port")
         self.old_res=''
-        # if config.get("resistance1", None) is None:
         self.thrhold = config.getint('thrhold', 4, minval=1) 
         if "i2c" in self.port:  
             self.i2c = bus.MCU_I2C_from_config(config, BDP_CHIP_ADDR, BDP_I2C_SPEED)
         elif "usb" in self.port:
             self.usb_port = config.get("serial")
             self._baud = config.getint('baud', 38400, minval=2400) 
-            #THRHOLD
-           # baudrate = self.usb_port = config.get("") #38400
             self.usb = serial.Serial(self.usb_port, self._baud,timeout=0.5)
             self.usb.reset_input_buffer()
             self.usb.reset_output_buffer()
@@ -67,30 +64,43 @@ class BD_Pressure_Advance:
         if "usb" == self.port:
             self.usb.write('e;'.encode())
             self.usb.write((str(self.thrhold)+';').encode())
-           # response += self.usb.readline().decode('utf-8').strip()
         elif "i2c" == self.port: 
-          #  response += self.read_register('_version', 15).decode('utf-8')
-          #  self.gcode.respond_info("%s "%(response))
-            #self.write_register('endstop_thr',6)
             self.write_register('pa_probe_mode',2)
             self.write_register('probe_thr',self.thrhold)
 
+    # 新增：即时设置阈值的核心函数
+    def set_threshold(self, new_threshold):
+        # 校验阈值合法性（≥1）
+        if not isinstance(new_threshold, int) or new_threshold < 1:
+            self.gcode.respond_info(f"[{self.bd_name}] 阈值错误：必须是≥1的整数，当前值：{new_threshold}")
+            return False
+        # 更新本地阈值变量
+        self.thrhold = new_threshold
+        self.gcode.respond_info(f"[{self.bd_name}] 本地阈值已更新为：{self.thrhold}")
+        # 立即下发新阈值给传感器
+        self.set_probe_mode()
+        self.gcode.respond_info(f"[{self.bd_name}] 新阈值已下发给传感器，生效中！")
+        return True
 
     def _handle_ready(self):
-        #self.set_probe_mode()
+        self.set_probe_mode()  # 取消注释，Klipper启动时立即下发初始阈值
         self.toolhead = self.printer.lookup_object('toolhead')
         
          
     def handle_homing_move_begin(self, hmove):
-        self.set_probe_mode()
-       # if self.mcu_probe in hmove.get_mcu_endstops():
-        #    self.mcu_probe.probe_prepare(hmove)        
+        self.set_probe_mode()        
         
-    cmd_SET_BDPRESSURE_help = "cmd for BD_PRESSURE sensor,SET_BDPRESSURE NAME=xxx COMMAND=START/STOP/RESET_PROBE/READ VALUE=X"
+    # 扩展指令说明，新增SET_THRESHOLD命令
+    cmd_SET_BDPRESSURE_help = "cmd for BD_PRESSURE sensor,SET_BDPRESSURE NAME=xxx COMMAND=START/STOP/RESET_PROBE/READ/SET_THRESHOLD VALUE=X"
     def cmd_SET_BDPRESSURE(self, gcmd):
-        # Read requested value
         cmd = gcmd.get('COMMAND')
-       # self.gcode.respond_info("Send %s to bdpressure:%s"%(cmd,self.bd_name))
+        # 新增：处理SET_THRESHOLD命令
+        if 'SET_THRESHOLD' in cmd:
+            # 从VALUE参数获取新阈值
+            new_thr = gcmd.get_int('VALUE', minval=1)
+            self.set_threshold(new_thr)
+            return
+        # 原有命令逻辑保持不变
         if 'START' in cmd:
             self.cmd_start(gcmd)
         elif 'STOP' in cmd:  
@@ -100,8 +110,6 @@ class BD_Pressure_Advance:
         elif 'READ' in cmd:  
             self.cmd_read(gcmd)  
         
-            
-            
     def _resend_current_val(self, eventtime):
         if self.last_value == self.shutdown_value:
             self.reactor.unregister_timer(self.resend_timer)
@@ -110,16 +118,13 @@ class BD_Pressure_Advance:
 
         systime = self.reactor.monotonic()
         print_time = self.mcu_enable_pin_x.get_mcu().estimated_print_time(systime)
-       # print_time = self.mcu_enable_pin_y.get_mcu().estimated_print_time(systime)
         time_diff = (self.last_print_time + self.resend_interval) - print_time
         if time_diff > 0.:
-            # Reschedule for resend time
             return systime + time_diff
         self._set_pin(print_time + PIN_MIN_TIME, self.last_value, True)
         return systime + self.resend_interval
 
     def enable_pin_init(self, config, stepper_name):
-
         stconfig = config.getsection(stepper_name) 
         if stconfig is None:
             return None, None
@@ -129,16 +134,12 @@ class BD_Pressure_Advance:
         logging.info(" init %s"%(stepper_name))       
         self.printer = config.get_printer()
         ppins = self.printer.lookup_object('pins')
-        # Determine pin type
-
         pin_params = ppins.lookup_pin(enable_pin_s, can_invert=True, can_pullup=True,share_type='stepper_enable')
         mcu_pin_s = pin_params['chip'].setup_pin('digital_out', pin_params)
         _invert_stepper = pin_params['invert']
 
-   
         self.scale = 1.
         self.last_print_time = 0.
-        # Support mcu checking for maximum duration
         self.reactor = self.printer.get_reactor()
         self.resend_timer = None
         self.resend_interval = 0.
@@ -149,9 +150,7 @@ class BD_Pressure_Advance:
         if max_mcu_duration:
             config.deprecate('maximum_mcu_duration')
             self.resend_interval = max_mcu_duration - RESEND_HOST_TIME
-        # Determine start and shutdown values
-        static_value = (_invert_stepper==True) #config.getfloat('static_value', None,
-                           #            minval=0., maxval=self.scale)
+        static_value = (_invert_stepper==True)
         self.last_value = self.shutdown_value = static_value / self.scale
         mcu_pin_s.setup_start_value(self.last_value, self.shutdown_value)
         return _invert_stepper,mcu_pin_s
@@ -174,7 +173,6 @@ class BD_Pressure_Advance:
     
     def cmd_start(self, gcmd):
         toolhead = self.printer.lookup_object('toolhead')
-        ##disable y motor
         toolhead.register_lookahead_callback(
                lambda print_time: self._set_pin(print_time, self._invert_stepper_x==False))  
 
@@ -182,6 +180,11 @@ class BD_Pressure_Advance:
         self.last_state = 1
         response = ""
         if "usb" == self.port:
+            # 启动时重新下发阈值（确保传感器用最新值）
+            self.usb.write('e;'.encode())
+            self.usb.write((str(self.thrhold)+';').encode())
+            toolhead.dwell(0.1)
+            
             self.usb.write('l;'.encode())
             toolhead.dwell(0.4)
             self.usb.reset_input_buffer()
@@ -194,15 +197,8 @@ class BD_Pressure_Advance:
             
             while self.usb.in_waiting:
                 self.usb.read(self.usb.in_waiting)
-            
-
-    
         elif "i2c" == self.port: 
-            
-            #self.write_register('endstop_thr',6)
-          #  toolhead.dwell(0.2)
             self.write_register('pa_probe_mode',7)
-        #    toolhead.dwell(0.4)
             self.write_register('raw_data_out',0)
             response += self.read_register('_version', 15).decode('utf-8')
         self.gcode.respond_info(".cmd_start %s: %s"%(self.port,response)) 
@@ -211,7 +207,6 @@ class BD_Pressure_Advance:
         self.gcode.respond_info("%s: %s"%(self.bd_name,str_data))
         if 'R:' in str_data and ',' in str_data:
             R_v=str_data.strip().split('R:')[1].split(',')
-          #  self.gcode.respond_info("%s %s"%(R_v[3],R_v[4]))
             if len(R_v)==5:                
                 res=int(R_v[0])
                 lk=int(R_v[1])
@@ -221,8 +216,6 @@ class BD_Pressure_Advance:
                 val_step = float(gcmd.get('VALUE'))
                 pa_val = [val_step,res,lk,rk,Hk,Ha]
                 self.PA_data.append(pa_val)
-             #   self.gcode.respond_info("The Pressure Value at %f is res:%d,L:%d,R:%d,H:%d,Hav:%d"%(pa_val[0],pa_val[1],pa_val[2],pa_val[3],pa_val[4],pa_val[5])) 
-          #  if len(self.PA_data)>=10: 
             num=len(self.PA_data)
             flag=1
             if num>=20:
@@ -232,7 +225,6 @@ class BD_Pressure_Advance:
                         break
                 if flag==1:         
                     self.stop_pa(gcmd)
-            
         elif 'stop' in str_data:
             self.last_state=0
                         
@@ -240,17 +232,11 @@ class BD_Pressure_Advance:
         self.bdw_data = ''    
         buffer = bytearray()
         response = ""
-       # self.gcode.respond_info("cmd_read %s"%self.bd_name)
         if "usb" == self.port:
             if self.usb.is_open:
-               # self.usb.write('R;\n'.encode())
                 self.usb.timeout = 1
-                
                 try:
                     response = self.usb.read(self.usb.in_waiting or 1).decode('utf-8').strip() 
-                   # response += self.usb.readline().decode('utf-8').strip()
-                    #self.usb.write('l;'.encode())
-                   # self.gcode.respond_info("%s: %s........"%(self.bd_name,response))
                 except:
                     return False
                 if response:
@@ -258,17 +244,12 @@ class BD_Pressure_Advance:
                     self.pa_data_process(gcmd,response)
                 else:
                     self.pa_data_process(gcmd,self.old_res)
-                    
         elif "i2c" == self.port:
             response = self.read_register('_measure_data', 32).decode('utf-8').strip('\0')
             self.pa_data_process(gcmd,response)
-        #if self.is_debug == True:
-        #    self.gcode.respond_info("bdwidth, port:%s, width:%.3f mm (%d),motion:%d" % (self.port,self.lastFilamentWidthReading,
-         #                                        self.raw_width,self.lastMotionReading))          
         return True       
 
     def read_register(self, reg_name, read_len):
-        # read a single register
         regs = [BDP_REGS[reg_name]]
         params = self.i2c.i2c_read(regs, read_len)
         return bytearray(params['response'])
@@ -282,24 +263,20 @@ class BD_Pressure_Advance:
 
     def stop_pa(self,gcmd):
         toolhead = self.printer.lookup_object('toolhead')
-        ##enable y motor
         toolhead.register_lookahead_callback(
                 lambda print_time: self._set_pin(print_time, self._invert_stepper_x==True))
         self.last_state = 0     
         response = ""
         if "usb" == self.port:
             self.usb.write('e;'.encode())
+            self.usb.write((str(self.thrhold)+';').encode())  # 停止时也下发最新阈值
             self.usb.write('D;'.encode())
-           # response += self.usb.readline().decode('utf-8').strip()
         elif "i2c" == self.port: 
-           # response += self.read_register('_version', 15).decode('utf-8')
-            #self.write_register('endstop_thr',6)
             self.write_register('pa_probe_mode',2)
+            self.write_register('probe_thr',self.thrhold)  # 停止时更新寄存器阈值
             self.write_register('raw_data_out',0)
 
-            
     def cmd_stop(self, gcmd):
-        
         self.stop_pa(gcmd)     
         if len(self.PA_data)>=5: 
             self.PA_data.pop(0)
@@ -307,9 +284,6 @@ class BD_Pressure_Advance:
             self.PA_data.pop(2)
             self.PA_data.pop(3)
             self.PA_data.pop(4)
-           # for s_pa in self.PA_data:
-           #     if s_pa[5]<0 or s_pa[4]<=0:
-            #        self.PA_data.remove(s_pa)
             min_s = self.PA_data[-1]  
             min_index = len(self.PA_data)-1
             for index, s_pa in enumerate(reversed(self.PA_data)):
@@ -329,33 +303,26 @@ class BD_Pressure_Advance:
                 if (min_r[1]+abs(min_r[5]))>(s_pa[1]+abs(s_pa[5])):
                     min_r=s_pa
             min_s=min_r      
-           # min_s=self.PA_data[min_index]    
-
             self.gcode.respond_info("Calc the best Pressure Advance: %f, %d %d"%(min_s[0],min_s[1],min_index))  
             set_pa = 'SET_PRESSURE_ADVANCE ADVANCE='+str(min_s[0])
             self.gcode.run_script_from_command(set_pa)
-            
         else:
             self.gcode.respond_info("No PA calibration data or number is <=5") 
          
     def cmd_reset_probe(self, gcmd):
         toolhead = self.printer.lookup_object('toolhead')
-        ##enable y motor
-      #  toolhead.register_lookahead_callback(
-       #         lambda print_time: self._set_pin(print_time, self._invert_stepper_y==True))
-            
         response = ""
         if "usb" == self.port:
             self.usb.write('N;'.encode())
             response += self.usb.readline().decode('utf-8').strip()
         elif "i2c" == self.port: 
-            #response += self.read_register('reset_probe',52).decode('utf-8')   
             self.write_register('reset_probe',1)
 
     def get_status(self, eventtime=None):
-        if self.last_state:
-            return {'state': "START"} 
-        return {'state': "STOP"}        
+        # 新增：返回当前阈值，方便查看
+        status = {'state': "START" if self.last_state else "STOP",
+                  'current_threshold': self.thrhold}
+        return status        
 
 def load_config_prefix(config):
     return BD_Pressure_Advance(config)
