@@ -4,6 +4,8 @@ import statistics
 import serial
 import os
 import time
+import fcntl
+import glob
 
 from . import bus
 from . import filament_switch_sensor
@@ -26,6 +28,12 @@ PIN_MIN_TIME = 0.100
 RESEND_HOST_TIME = 0.300 + PIN_MIN_TIME
 MAX_SCHEDULE_TIME = 5.0
 
+# 串口配置常量
+SERIAL_TIMEOUT = 1.0
+SERIAL_WRITE_TIMEOUT = 1.0
+RETRY_COUNT = 3  # 串口初始化重试次数
+RETRY_DELAY = 0.5  # 重试延时
+
 
 class BD_Pressure_Advance:
     def __init__(self, config):
@@ -35,27 +43,18 @@ class BD_Pressure_Advance:
         self.old_res = ''
         self.thrhold = config.getint('thrhold', 4, minval=1) 
         self.toolhead = None  # 提前初始化toolhead变量
+        self.usb = None  # 初始化串口对象为None
+        self.usb_port = None
+        self._baud = None
         
         if "i2c" in self.port:  
             self.i2c = bus.MCU_I2C_from_config(config, BDP_CHIP_ADDR, BDP_I2C_SPEED)
         elif "usb" in self.port:
+            # 保存串口配置，便于后续重连
             self.usb_port = config.get("serial")
             self._baud = config.getint('baud', 38400, minval=2400) 
-            try:
-                # 增加串口超时时间，确保稳定通信
-                self.usb = serial.Serial(
-                    self.usb_port, 
-                    self._baud, 
-                    timeout=1.0,  # 增加超时时间到1秒
-                    write_timeout=1.0
-                )
-                self.usb.reset_input_buffer()
-                self.usb.reset_output_buffer()
-                # 初始化时发送一次模式和阈值，确保初始状态正确
-                self._send_usb_command('e;\n', "初始化Probe模式")
-            except Exception as e:
-                logging.error(f"USB串口初始化失败: {str(e)}")
-                self.usb = None
+            # 初始化串口（带重试机制）
+            self._init_usb_serial()
         
         self.PA_data = []    
         self.bd_name = config.get_name().split()[1]     
@@ -70,12 +69,95 @@ class BD_Pressure_Advance:
                                    self.cmd_SET_BDPRESSURE,
                                    desc=self.cmd_SET_BDPRESSURE_help)   
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
-        self.printer.register_event_handler("homing:homing_move_begin", self.handle_homing_move_begin)                                        
+        self.printer.register_event_handler("homing:homing_move_begin", self.handle_homing_move_begin)
+    
+    def _init_usb_serial(self):
+        """初始化USB串口（带重试和权限检查）"""
+        if not self.usb_port or not self._baud:
+            self.gcode.respond_info(f"[{self.bd_name}] 串口配置不完整，无法初始化")
+            return False
+            
+        # 检查串口设备是否存在
+        if not os.path.exists(self.usb_port):
+            # 尝试自动查找FTDI设备
+            ftdi_devs = glob.glob('/dev/serial/by-id/usb-FTDI_FT232R_USB_UART*')
+            if ftdi_devs:
+                self.usb_port = ftdi_devs[0]
+                self.gcode.respond_info(f"[{self.bd_name}] 自动找到FTDI设备：{self.usb_port}")
+            else:
+                self.gcode.respond_info(f"[{self.bd_name}] 串口设备不存在：{self.usb_port}")
+                return False
+        
+        # 检查串口权限
+        try:
+            if not os.access(self.usb_port, os.R_OK | os.W_OK):
+                self.gcode.respond_info(f"[{self.bd_name}] 串口权限不足：{self.usb_port}")
+                # 尝试添加权限（需要root）
+                os.system(f"chmod 666 {self.usb_port}")
+        except Exception as e:
+            self.gcode.respond_info(f"[{self.bd_name}] 检查串口权限失败：{str(e)}")
+        
+        # 多次重试初始化串口
+        for retry in range(RETRY_COUNT):
+            try:
+                # 关闭已存在的串口连接
+                if self.usb and self.usb.is_open:
+                    self.usb.close()
+                
+                # 初始化串口
+                self.usb = serial.Serial(
+                    port=self.usb_port,
+                    baudrate=self._baud,
+                    timeout=SERIAL_TIMEOUT,
+                    write_timeout=SERIAL_WRITE_TIMEOUT,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    bytesize=serial.EIGHTBITS,
+                    xonxoff=False,
+                    rtscts=False,
+                    dsrdtr=False
+                )
+                
+                # 清空缓存
+                self.usb.reset_input_buffer()
+                self.usb.reset_output_buffer()
+                
+                self.gcode.respond_info(f"[{self.bd_name}] 串口初始化成功（第{retry+1}次尝试）：{self.usb_port} @ {self._baud}")
+                return True
+                
+            except Exception as e:
+                self.gcode.respond_info(f"[{self.bd_name}] 串口初始化失败（第{retry+1}次尝试）：{str(e)}")
+                time.sleep(RETRY_DELAY)
+        
+        self.gcode.respond_info(f"[{self.bd_name}] 串口初始化最终失败，已重试{RETRY_COUNT}次")
+        self.usb = None
+        return False
+    
+    def _ensure_usb_connected(self):
+        """确保串口已连接，断开则自动重连"""
+        if "i2c" in self.port:
+            return True
+            
+        # 检查串口状态
+        if self.usb is None or not self.usb.is_open:
+            self.gcode.respond_info(f"[{self.bd_name}] 串口未连接，尝试重连...")
+            return self._init_usb_serial()
+        
+        # 检查串口是否可用
+        try:
+            # 发送空指令测试串口
+            self.usb.write(b';\n')
+            self.usb.flush()
+            return True
+        except Exception as e:
+            self.gcode.respond_info(f"[{self.bd_name}] 串口连接异常：{str(e)}，尝试重连...")
+            return self._init_usb_serial()
     
     def _send_usb_command(self, cmd, desc="指令"):
         """通用USB指令发送函数，带错误处理和响应验证"""
-        if self.usb is None or not self.usb.is_open:
-            self.gcode.respond_info(f"[{self.bd_name}] USB串口未初始化，{desc}发送失败")
+        # 确保串口已连接
+        if not self._ensure_usb_connected():
+            self.gcode.respond_info(f"[{self.bd_name}] 串口未连接，{desc}发送失败")
             return None
         
         try:
@@ -95,6 +177,8 @@ class BD_Pressure_Advance:
             return response
         except Exception as e:
             self.gcode.respond_info(f"[{self.bd_name}] {desc}发送失败: {str(e)}")
+            # 重置串口对象，触发下次重连
+            self.usb = None
             return None
 
     def set_probe_mode(self):
@@ -144,6 +228,9 @@ class BD_Pressure_Advance:
     def _handle_ready(self):
         """Klipper就绪时初始化并下发初始阈值"""
         self.toolhead = self.printer.lookup_object('toolhead')
+        # 确保串口已连接
+        if "usb" in self.port:
+            self._ensure_usb_connected()
         # 先切换Probe模式，再下发初始阈值
         self.set_probe_mode()
         if "usb" == self.port:
@@ -152,6 +239,9 @@ class BD_Pressure_Advance:
         
     def handle_homing_move_begin(self, hmove):
         """归位时重新切换Probe模式并重置阈值"""
+        # 确保串口连接
+        self._ensure_usb_connected()
+        # 切换Probe模式
         self.set_probe_mode()
         # 归位时重新下发当前阈值，避免阈值丢失
         if "usb" == self.port:
@@ -296,11 +386,12 @@ class BD_Pressure_Advance:
         buffer = bytearray()
         response = ""
         
-        if "usb" == self.port:
-            if self.usb is None or not self.usb.is_open:
-                self.gcode.respond_info(f"[{self.bd_name}] USB串口未打开，无法读取数据")
-                return False
+        # 确保串口连接
+        if not self._ensure_usb_connected():
+            self.gcode.respond_info(f"[{self.bd_name}] 串口未连接，读取数据失败")
+            return False
                 
+        if "usb" == self.port:
             try:
                 # 发送空指令触发传感器返回状态
                 self.usb.write(';\n'.encode())
@@ -309,6 +400,8 @@ class BD_Pressure_Advance:
                 response = self.usb.read(self.usb.in_waiting or 1024).decode('utf-8', errors='ignore').strip() 
             except Exception as e:
                 self.gcode.respond_info(f"[{self.bd_name}] 读取数据失败：{str(e)}")
+                # 重置串口对象，触发下次重连
+                self.usb = None
                 return False
                 
             if response:
@@ -402,6 +495,9 @@ class BD_Pressure_Advance:
             self.toolhead = self.printer.lookup_object('toolhead')
             
         if "usb" == self.port:
+            # 确保串口连接
+            if not self._ensure_usb_connected():
+                return
             # 步骤1：发送重置指令
             response = self._send_usb_command('N;\n', "重置传感器基准值")
             # 步骤2：重置后重新下发当前阈值，避免阈值回退
@@ -414,7 +510,8 @@ class BD_Pressure_Advance:
         """返回当前状态和阈值"""
         status = {
             'state': "START" if self.last_state else "STOP",
-            'current_threshold': self.thrhold
+            'current_threshold': self.thrhold,
+            'usb_connected': self.usb is not None and self.usb.is_open if "usb" in self.port else True
         }
         return status        
 
