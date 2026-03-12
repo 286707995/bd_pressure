@@ -178,37 +178,41 @@ class BD_Pressure_Advance:
             self.resend_timer = self.reactor.register_timer(
                 self._resend_current_val, self.reactor.NOW)
 
-    def cmd_start(self, gcmd):
-        if self.toolhead is None:
-            self.toolhead = self.printer.lookup_object('toolhead')
 
-        # 关键修复：校准期间保持电机锁定（不修改enable_pin）
-        self.motor_locked = True
-        self.last_state = 1
+def cmd_start(self, gcmd):
+    if self.toolhead is None:
+        self.toolhead = self.printer.lookup_object('toolhead')
 
-        # 串口操作（非阻塞）
-        response = ""
-        if self.usb and "usb" == self.port:
-            try:
-                # 非阻塞串口操作
-                self.usb.write('l;'.encode())
-                time.sleep(0.05)
-                self.usb.write('D;'.encode())
-                time.sleep(0.05)
-                # 异步读取响应
-                if self.usb.in_waiting:
-                    response = self.usb.read(self.usb.in_waiting).decode('utf-8', errors='ignore').strip()
-            except Exception as e:
-                logging.error(f"串口START指令失败: {e}")
-        elif "i2c" == self.port:
-            try:
-                self.write_register('pa_probe_mode', 7)
-                self.write_register('raw_data_out', 0)
-                response = self.read_register('_version', 15).decode('utf-8')
-            except Exception as e:
-                logging.error(f"I2C START指令失败: {e}")
+    # 关键修复1：强制锁定电机（避免误触发）
+    self.motor_locked = True
+    self.last_state = 1
 
-        self.gcode.respond_info(f".cmd_start {self.port}: {response}")
+    # 关键修复2：清空串口缓冲区（避免旧指令干扰）
+    response = ""
+    if self.usb and "usb" == self.port:
+        try:
+            # 先清空缓冲区
+            self.usb.reset_input_buffer()
+            self.usb.reset_output_buffer()
+            # 分步发送PA模式指令（确保固件解析）
+            self.usb.write('l;'.encode())
+            time.sleep(0.1)  # 延长延时，确保固件解析
+            self.usb.write('D;'.encode())
+            time.sleep(0.1)
+            # 读取响应确认模式
+            if self.usb.in_waiting:
+                response = self.usb.read(self.usb.in_waiting).decode('utf-8', errors='ignore').strip()
+        except Exception as e:
+            logging.error(f"串口START指令失败: {e}")
+    elif "i2c" == self.port:
+        try:
+            self.write_register('pa_probe_mode', 7)
+            self.write_register('raw_data_out', 0)
+            response = self.read_register('_version', 15).decode('utf-8')
+        except Exception as e:
+            logging.error(f"I2C START指令失败: {e}")
+
+    self.gcode.respond_info(f".cmd_start {self.port}: {response}")
 
     def pa_data_process(self, gcmd, str_data):
         self.gcode.respond_info(f"{self.bd_name}: {str_data}")
@@ -300,41 +304,51 @@ class BD_Pressure_Advance:
             except Exception as e:
                 logging.error(f"I2C STOP指令失败: {e}")
 
-    def cmd_stop(self, gcmd):
-        self.stop_pa(gcmd)
-        if len(self.PA_data) >= 5:
-            # 移除前5个不稳定数据
-            del self.PA_data[:5]
 
-            min_s = self.PA_data[-1]
-            min_index = len(self.PA_data) - 1
+def cmd_stop(self, gcmd):
+    self.stop_pa(gcmd)
+    if len(self.PA_data) >= 5:
+        # 移除前5个不稳定数据
+        del self.PA_data[:5]
 
-            # 查找最小阈值索引
-            for index, s_pa in enumerate(reversed(self.PA_data)):
-                if s_pa[4] < 5:
-                    min_index = len(self.PA_data) - 1 - index
+        # 关键修复：过滤无效数据（Hk/Ha为0或异常值）
+        valid_data = [d for d in self.PA_data if d[4] > 0 and d[5] > 0]  # d[4]=Hk, d[5]=Ha
+        if not valid_data:
+            self.gcode.respond_info("No valid PA data (Hk/Ha=0)")
+            return
+
+        min_s = valid_data[-1]
+        min_index = len(valid_data) - 1
+
+        # 查找最小阈值索引
+        for index, s_pa in enumerate(reversed(valid_data)):
+            if s_pa[4] < 5:
+                min_index = len(valid_data) - 1 - index
+                break
+        if min_index == len(valid_data) - 1:
+            for index, s_pa in enumerate(reversed(valid_data)):
+                if s_pa[5] < 5:
+                    min_index = len(valid_data) - 1 - index
                     break
-            if min_index == len(self.PA_data) - 1:
-                for index, s_pa in enumerate(reversed(self.PA_data)):
-                    if s_pa[5] < 5:
-                        min_index = len(self.PA_data) - 1 - index
-                        break
 
-            if min_index == len(self.PA_data) - 1:
-                self.gcode.respond_info("Calc the best Pressure Advance error!")
-                return
+        if min_index == len(valid_data) - 1:
+            self.gcode.respond_info("Calc the best Pressure Advance error! (no Hk/Ha <5)")
+            return
 
-            min_r = self.PA_data[-1]
-            for s_pa in self.PA_data[min_index:]:
-                if (min_r[1] + abs(min_r[5])) > (s_pa[1] + abs(s_pa[5])):
-                    min_r = s_pa
-            min_s = min_r
+        min_r = valid_data[-1]
+        for s_pa in valid_data[min_index:]:
+            if (min_r[1] + abs(min_r[5])) > (s_pa[1] + abs(s_pa[5])):
+                min_r = s_pa
+        min_s = min_r
 
-            self.gcode.respond_info(f"Calc the best Pressure Advance: {min_s[0]:f}, {min_s[1]} {min_index}")
-            set_pa = f'SET_PRESSURE_ADVANCE ADVANCE={min_s[0]}'
-            self.gcode.run_script_from_command(set_pa)
-        else:
-            self.gcode.respond_info("No PA calibration data or number is <=5")
+        self.gcode.respond_info(f"Calc the best Pressure Advance: {min_s[0]:f}, {min_s[1]} {min_index}")
+        set_pa = f'SET_PRESSURE_ADVANCE ADVANCE={min_s[0]}'
+        self.gcode.run_script_from_command(set_pa)
+    else:
+        self.gcode.respond_info("No PA calibration data or number is <=5")
+
+
+
 
     def cmd_reset_probe(self, gcmd):
         if self.toolhead is None:
