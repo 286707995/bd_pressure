@@ -3,7 +3,7 @@ import math
 import statistics
 import serial
 import os
-
+import time
 
 from . import bus
 from . import filament_switch_sensor
@@ -20,7 +20,6 @@ BDP_REGS = {
      'rang' : 51,
      'reset_probe' : 52,
      'invert_data' : 53
-
 }
 
 PIN_MIN_TIME = 0.100
@@ -43,9 +42,17 @@ class BD_Pressure_Advance:
             self.usb_port = config.get("serial")
             self._baud = config.getint('baud', 38400, minval=2400) 
             try:
-                self.usb = serial.Serial(self.usb_port, self._baud, timeout=0.5)
+                # 增加串口超时时间，确保稳定通信
+                self.usb = serial.Serial(
+                    self.usb_port, 
+                    self._baud, 
+                    timeout=1.0,  # 增加超时时间到1秒
+                    write_timeout=1.0
+                )
                 self.usb.reset_input_buffer()
                 self.usb.reset_output_buffer()
+                # 初始化时发送一次模式和阈值，确保初始状态正确
+                self._send_usb_command('e;\n', "初始化Probe模式")
             except Exception as e:
                 logging.error(f"USB串口初始化失败: {str(e)}")
                 self.usb = None
@@ -64,22 +71,37 @@ class BD_Pressure_Advance:
                                    desc=self.cmd_SET_BDPRESSURE_help)   
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self.printer.register_event_handler("homing:homing_move_begin", self.handle_homing_move_begin)                                        
+    
+    def _send_usb_command(self, cmd, desc="指令"):
+        """通用USB指令发送函数，带错误处理和响应验证"""
+        if self.usb is None or not self.usb.is_open:
+            self.gcode.respond_info(f"[{self.bd_name}] USB串口未初始化，{desc}发送失败")
+            return None
+        
+        try:
+            # 清空输入缓存，避免旧数据干扰
+            self.usb.reset_input_buffer()
+            # 发送指令
+            self.usb.write(cmd.encode())
+            self.usb.flush()  # 确保指令完全发送
+            # 等待传感器响应
+            time.sleep(0.2)  # 增加稳定延时
+            # 读取响应
+            response = ""
+            while self.usb.in_waiting > 0:
+                response += self.usb.read(self.usb.in_waiting).decode('utf-8', errors='ignore').strip()
+                time.sleep(0.05)  # 分段读取，避免数据截断
+            self.gcode.respond_info(f"[{self.bd_name}] {desc}发送成功: {cmd.strip()} | 响应: {response}")
+            return response
+        except Exception as e:
+            self.gcode.respond_info(f"[{self.bd_name}] {desc}发送失败: {str(e)}")
+            return None
 
     def set_probe_mode(self):
         """切换到Probe模式（仅模式切换，不设置阈值）"""
-        if self.usb is None and "usb" in self.port:
-            self.gcode.respond_info(f"[{self.bd_name}] USB串口未初始化，无法切换Probe模式")
-            return
-            
         if "usb" == self.port:
-            try:
-                # 传感器指令：切换到Probe模式 e;\n
-                self.usb.write('e;\n'.encode())
-                self.toolhead.dwell(0.1)  # 延时确保模式切换完成
-                self.usb.reset_input_buffer()
-                self.gcode.respond_info(f"[{self.bd_name}] 已切换到Probe模式")
-            except Exception as e:
-                self.gcode.respond_info(f"[{self.bd_name}] 切换Probe模式失败: {str(e)}")
+            # 发送Probe模式指令，带换行符
+            self._send_usb_command('e;\n', "切换Probe模式")
         elif "i2c" == self.port: 
             self.write_register('pa_probe_mode', 2)
             self.write_register('probe_thr', self.thrhold)
@@ -97,24 +119,20 @@ class BD_Pressure_Advance:
         
         # USB模式：按传感器指令规则下发阈值
         if "usb" == self.port:
-            if self.usb is None:
-                self.gcode.respond_info(f"[{self.bd_name}] USB串口未初始化，无法下发阈值")
-                return False
-                
-            try:
-                # 步骤1：先切换到Probe模式（设置阈值的前提）
-                self.usb.write('e;\n'.encode())
-                self.toolhead.dwell(0.1)
-                
-                # 步骤2：单独发送阈值指令（传感器要求单独发送数字;\\n）
-                self.usb.write(f'{self.thrhold};\n'.encode())
-                self.toolhead.dwell(0.05)  # 延长延时确保传感器接收
-                
-                # 清空串口缓存，避免指令堆积
-                self.usb.reset_input_buffer()
-                self.gcode.respond_info(f"[{self.bd_name}] 新阈值{self.thrhold}已按官方格式下发！")
-            except Exception as e:
-                self.gcode.respond_info(f"[{self.bd_name}] 阈值下发失败：{str(e)}")
+            # 步骤1：先切换到Probe模式（设置阈值的前提）
+            self._send_usb_command('e;\n', "切换Probe模式(设置阈值前置)")
+            
+            # 步骤2：发送阈值指令（传感器要求单独发送数字;\\n）
+            threshold_cmd = f'{self.thrhold};\n'
+            response = self._send_usb_command(threshold_cmd, f"设置阈值{self.thrhold}")
+            
+            # 验证阈值是否设置成功
+            if response and f"THRHOLD_Z: {self.thrhold}" in response:
+                self.gcode.respond_info(f"[{self.bd_name}] 阈值{self.thrhold}设置成功并验证通过！")
+            elif response:
+                self.gcode.respond_info(f"[{self.bd_name}] 阈值下发成功，但响应未验证: {response}")
+            else:
+                self.gcode.respond_info(f"[{self.bd_name}] 阈值下发后未收到响应，可能设置失败")
                 return False
         # I2C模式逻辑不变
         elif "i2c" == self.port:
@@ -129,16 +147,15 @@ class BD_Pressure_Advance:
         # 先切换Probe模式，再下发初始阈值
         self.set_probe_mode()
         if "usb" == self.port:
-            try:
-                self.usb.write(f'{self.thrhold};\n'.encode())
-                self.toolhead.dwell(0.2)
-                self.gcode.respond_info(f"[{self.bd_name}] 初始阈值{self.thrhold}已下发")
-            except Exception as e:
-                self.gcode.respond_info(f"[{self.bd_name}] 初始阈值下发失败: {str(e)}")
+            # 显式发送初始阈值
+            self.set_threshold(self.thrhold)
         
     def handle_homing_move_begin(self, hmove):
-        """归位时重新切换Probe模式"""
-        self.set_probe_mode()        
+        """归位时重新切换Probe模式并重置阈值"""
+        self.set_probe_mode()
+        # 归位时重新下发当前阈值，避免阈值丢失
+        if "usb" == self.port:
+            self.set_threshold(self.thrhold)        
         
     # 扩展指令说明，新增SET_THRESHOLD命令
     cmd_SET_BDPRESSURE_help = "cmd for BD_PRESSURE sensor,SET_BDPRESSURE NAME=xxx COMMAND=START/STOP/RESET_PROBE/READ/SET_THRESHOLD VALUE=X"
@@ -236,42 +253,17 @@ class BD_Pressure_Advance:
 
         self.PA_data = [] 
         self.last_state = 1
-        response = ""
         
         if "usb" == self.port:
-            if self.usb is None:
-                self.gcode.respond_info(f"[{self.bd_name}] USB串口未初始化，无法启动PA模式")
-                return
-                
-            try:
-                # 步骤1：切换到PA模式 l;\n
-                self.usb.write('l;\n'.encode())
-                self.toolhead.dwell(0.4)
-                self.usb.reset_input_buffer()
-                self.usb.reset_output_buffer()
-                
-                # 步骤2：再次发送PA模式指令确保切换成功
-                self.usb.write('l;\n'.encode())
-                self.toolhead.dwell(0.4)
-                
-                # 步骤3：启用原始数据输出 d;\n（传感器要求）
-                self.usb.write('d;\n'.encode())
-                self.toolhead.dwell(0.4) 
-                
-                # 读取传感器响应
-                response += self.usb.readline().decode('utf-8').strip()
-                while self.usb.in_waiting:
-                    self.usb.read(self.usb.in_waiting)
-                    
-                self.gcode.respond_info(f"[{self.bd_name}] PA模式启动成功，传感器响应：{response}")
-            except Exception as e:
-                self.gcode.respond_info(f"[{self.bd_name}] PA模式启动失败：{str(e)}")
+            # 步骤1：切换到PA模式
+            self._send_usb_command('l;\n', "切换PA模式")
+            # 步骤2：启用原始数据输出
+            self._send_usb_command('d;\n', "启用原始数据输出")
         elif "i2c" == self.port: 
             self.write_register('pa_probe_mode', 7)
             self.write_register('raw_data_out', 0)
-            response += self.read_register('_version', 15).decode('utf-8')
-            
-        self.gcode.respond_info(f".cmd_start {self.port}: {response}") 
+            response = self.read_register('_version', 15).decode('utf-8')
+            self.gcode.respond_info(f".cmd_start {self.port}: {response}") 
 
     def pa_data_process(self, gcmd, str_data):
         self.gcode.respond_info(f"{self.bd_name}: {str_data}")
@@ -309,9 +301,12 @@ class BD_Pressure_Advance:
                 self.gcode.respond_info(f"[{self.bd_name}] USB串口未打开，无法读取数据")
                 return False
                 
-            self.usb.timeout = 1
             try:
-                response = self.usb.read(self.usb.in_waiting or 1).decode('utf-8').strip() 
+                # 发送空指令触发传感器返回状态
+                self.usb.write(';\n'.encode())
+                time.sleep(0.1)
+                # 读取所有响应数据
+                response = self.usb.read(self.usb.in_waiting or 1024).decode('utf-8', errors='ignore').strip() 
             except Exception as e:
                 self.gcode.respond_info(f"[{self.bd_name}] 读取数据失败：{str(e)}")
                 return False
@@ -348,29 +343,14 @@ class BD_Pressure_Advance:
                 lambda print_time: self._set_pin(print_time, self._invert_stepper_x==True))
                 
         self.last_state = 0     
-        response = ""
         
         if "usb" == self.port:
-            if self.usb is None:
-                self.gcode.respond_info(f"[{self.bd_name}] USB串口未初始化，无法停止PA模式")
-                return
-                
-            try:
-                # 步骤1：切换回Probe模式 e;\n
-                self.usb.write('e;\n'.encode())
-                self.toolhead.dwell(0.1)
-                
-                # 步骤2：发送当前阈值（确保传感器保留最新阈值）
-                self.usb.write(f'{self.thrhold};\n'.encode())
-                self.toolhead.dwell(0.1)
-                
-                # 步骤3：禁用原始数据输出 D;\n
-                self.usb.write('D;\n'.encode())
-                self.toolhead.dwell(0.4)
-                
-                response += self.usb.readline().decode('utf-8').strip()
-            except Exception as e:
-                self.gcode.respond_info(f"[{self.bd_name}] 停止PA模式失败：{str(e)}")
+            # 步骤1：切换回Probe模式
+            self._send_usb_command('e;\n', "切换回Probe模式")
+            # 步骤2：禁用原始数据输出
+            self._send_usb_command('D;\n', "禁用原始数据输出")
+            # 步骤3：重新下发当前阈值，确保阈值不丢失
+            self.set_threshold(self.thrhold)
         elif "i2c" == self.port: 
             self.write_register('pa_probe_mode', 2)
             self.write_register('probe_thr', self.thrhold)
@@ -421,19 +401,12 @@ class BD_Pressure_Advance:
         if self.toolhead is None:
             self.toolhead = self.printer.lookup_object('toolhead')
             
-        response = ""
         if "usb" == self.port:
-            if self.usb is None:
-                self.gcode.respond_info(f"[{self.bd_name}] USB串口未初始化，无法重置传感器")
-                return
-                
-            try:
-                self.usb.write('N;\n'.encode())  # 重置指令加换行符
-                self.toolhead.dwell(0.2)
-                response += self.usb.readline().decode('utf-8').strip()
-                self.gcode.respond_info(f"[{self.bd_name}] 传感器重置成功，响应：{response}")
-            except Exception as e:
-                self.gcode.respond_info(f"[{self.bd_name}] 重置传感器失败：{str(e)}")
+            # 步骤1：发送重置指令
+            response = self._send_usb_command('N;\n', "重置传感器基准值")
+            # 步骤2：重置后重新下发当前阈值，避免阈值回退
+            if response:
+                self.set_threshold(self.thrhold)
         elif "i2c" == self.port: 
             self.write_register('reset_probe', 1)
 
