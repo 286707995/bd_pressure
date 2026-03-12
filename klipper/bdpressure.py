@@ -4,7 +4,6 @@ import statistics
 import serial
 import os
 import time
-import fcntl
 import glob
 
 from . import bus
@@ -46,7 +45,20 @@ class BD_Pressure_Advance:
         self.usb = None  # 初始化串口对象为None
         self.usb_port = None
         self._baud = None
+        self.gcode = None  # 先初始化gcode属性为None
+        self.bd_name = config.get_name().split()[1]  # 提前初始化bd_name
         
+        # 1. 先初始化gcode（关键修复：调整初始化顺序）
+        self.gcode = self.printer.lookup_object('gcode')
+        
+        # 2. 初始化步进电机引脚（需要gcode之前初始化）
+        self._invert_stepper_x, self.mcu_enable_pin_x = self.enable_pin_init(config,"stepper_x")
+        self._invert_stepper_x1, self.mcu_enable_pin_x1 = self.enable_pin_init(config,"stepper_x1")
+        self._invert_stepper_y, self.mcu_enable_pin_y = self.enable_pin_init(config,"stepper_y")
+        self._invert_stepper_y1, self.mcu_enable_pin_y1 = self.enable_pin_init(config,"stepper_y1")
+        self.last_state = 0
+        
+        # 3. 初始化串口（现在gcode已存在）
         if "i2c" in self.port:  
             self.i2c = bus.MCU_I2C_from_config(config, BDP_CHIP_ADDR, BDP_I2C_SPEED)
         elif "usb" in self.port:
@@ -57,24 +69,26 @@ class BD_Pressure_Advance:
             self._init_usb_serial()
         
         self.PA_data = []    
-        self.bd_name = config.get_name().split()[1]     
-        self.gcode = self.printer.lookup_object('gcode')
-        self._invert_stepper_x, self.mcu_enable_pin_x = self.enable_pin_init(config,"stepper_x")
-        self._invert_stepper_x1, self.mcu_enable_pin_x1 = self.enable_pin_init(config,"stepper_x1")
-        self._invert_stepper_y, self.mcu_enable_pin_y = self.enable_pin_init(config,"stepper_y")
-        self._invert_stepper_y1, self.mcu_enable_pin_y1 = self.enable_pin_init(config,"stepper_y1")
-        self.last_state = 0
         
+        # 4. 注册GCODE指令（最后注册）
         self.gcode.register_mux_command("SET_BDPRESSURE", "NAME", self.bd_name,
                                    self.cmd_SET_BDPRESSURE,
                                    desc=self.cmd_SET_BDPRESSURE_help)   
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self.printer.register_event_handler("homing:homing_move_begin", self.handle_homing_move_begin)
     
+    def _log_info(self, message):
+        """安全的日志输出函数，兼容gcode未初始化的情况"""
+        if self.gcode is not None:
+            self.gcode.respond_info(f"[{self.bd_name}] {message}")
+        else:
+            # 回退到logging模块输出
+            logging.info(f"[{self.bd_name}] {message}")
+    
     def _init_usb_serial(self):
         """初始化USB串口（带重试和权限检查）"""
         if not self.usb_port or not self._baud:
-            self.gcode.respond_info(f"[{self.bd_name}] 串口配置不完整，无法初始化")
+            self._log_info("串口配置不完整，无法初始化")
             return False
             
         # 检查串口设备是否存在
@@ -83,19 +97,19 @@ class BD_Pressure_Advance:
             ftdi_devs = glob.glob('/dev/serial/by-id/usb-FTDI_FT232R_USB_UART*')
             if ftdi_devs:
                 self.usb_port = ftdi_devs[0]
-                self.gcode.respond_info(f"[{self.bd_name}] 自动找到FTDI设备：{self.usb_port}")
+                self._log_info(f"自动找到FTDI设备：{self.usb_port}")
             else:
-                self.gcode.respond_info(f"[{self.bd_name}] 串口设备不存在：{self.usb_port}")
+                self._log_info(f"串口设备不存在：{self.usb_port}")
                 return False
         
         # 检查串口权限
         try:
             if not os.access(self.usb_port, os.R_OK | os.W_OK):
-                self.gcode.respond_info(f"[{self.bd_name}] 串口权限不足：{self.usb_port}")
+                self._log_info(f"串口权限不足：{self.usb_port}")
                 # 尝试添加权限（需要root）
                 os.system(f"chmod 666 {self.usb_port}")
         except Exception as e:
-            self.gcode.respond_info(f"[{self.bd_name}] 检查串口权限失败：{str(e)}")
+            self._log_info(f"检查串口权限失败：{str(e)}")
         
         # 多次重试初始化串口
         for retry in range(RETRY_COUNT):
@@ -122,14 +136,14 @@ class BD_Pressure_Advance:
                 self.usb.reset_input_buffer()
                 self.usb.reset_output_buffer()
                 
-                self.gcode.respond_info(f"[{self.bd_name}] 串口初始化成功（第{retry+1}次尝试）：{self.usb_port} @ {self._baud}")
+                self._log_info(f"串口初始化成功（第{retry+1}次尝试）：{self.usb_port} @ {self._baud}")
                 return True
                 
             except Exception as e:
-                self.gcode.respond_info(f"[{self.bd_name}] 串口初始化失败（第{retry+1}次尝试）：{str(e)}")
+                self._log_info(f"串口初始化失败（第{retry+1}次尝试）：{str(e)}")
                 time.sleep(RETRY_DELAY)
         
-        self.gcode.respond_info(f"[{self.bd_name}] 串口初始化最终失败，已重试{RETRY_COUNT}次")
+        self._log_info(f"串口初始化最终失败，已重试{RETRY_COUNT}次")
         self.usb = None
         return False
     
@@ -140,7 +154,7 @@ class BD_Pressure_Advance:
             
         # 检查串口状态
         if self.usb is None or not self.usb.is_open:
-            self.gcode.respond_info(f"[{self.bd_name}] 串口未连接，尝试重连...")
+            self._log_info("串口未连接，尝试重连...")
             return self._init_usb_serial()
         
         # 检查串口是否可用
@@ -150,14 +164,14 @@ class BD_Pressure_Advance:
             self.usb.flush()
             return True
         except Exception as e:
-            self.gcode.respond_info(f"[{self.bd_name}] 串口连接异常：{str(e)}，尝试重连...")
+            self._log_info(f"串口连接异常：{str(e)}，尝试重连...")
             return self._init_usb_serial()
     
     def _send_usb_command(self, cmd, desc="指令"):
         """通用USB指令发送函数，带错误处理和响应验证"""
         # 确保串口已连接
         if not self._ensure_usb_connected():
-            self.gcode.respond_info(f"[{self.bd_name}] 串口未连接，{desc}发送失败")
+            self._log_info(f"串口未连接，{desc}发送失败")
             return None
         
         try:
@@ -173,10 +187,10 @@ class BD_Pressure_Advance:
             while self.usb.in_waiting > 0:
                 response += self.usb.read(self.usb.in_waiting).decode('utf-8', errors='ignore').strip()
                 time.sleep(0.05)  # 分段读取，避免数据截断
-            self.gcode.respond_info(f"[{self.bd_name}] {desc}发送成功: {cmd.strip()} | 响应: {response}")
+            self._log_info(f"{desc}发送成功: {cmd.strip()} | 响应: {response}")
             return response
         except Exception as e:
-            self.gcode.respond_info(f"[{self.bd_name}] {desc}发送失败: {str(e)}")
+            self._log_info(f"{desc}发送失败: {str(e)}")
             # 重置串口对象，触发下次重连
             self.usb = None
             return None
@@ -194,12 +208,12 @@ class BD_Pressure_Advance:
         """即时设置阈值核心函数（适配传感器USB指令格式）"""
         # 校验阈值合法性
         if not isinstance(new_threshold, int) or new_threshold < 1:
-            self.gcode.respond_info(f"[{self.bd_name}] 阈值错误：必须是≥1的整数，当前值：{new_threshold}")
+            self._log_info(f"阈值错误：必须是≥1的整数，当前值：{new_threshold}")
             return False
         
         # 更新本地阈值变量
         self.thrhold = new_threshold
-        self.gcode.respond_info(f"[{self.bd_name}] 本地阈值th已更新为：{self.thrhold}")
+        self._log_info(f"本地阈值th已更新为：{self.thrhold}")
         
         # USB模式：按传感器指令规则下发阈值
         if "usb" == self.port:
@@ -212,16 +226,16 @@ class BD_Pressure_Advance:
             
             # 验证阈值是否设置成功
             if response and f"THRHOLD_Z: {self.thrhold}" in response:
-                self.gcode.respond_info(f"[{self.bd_name}] 阈值{self.thrhold}设置成功并验证通过！")
+                self._log_info(f"阈值{self.thrhold}设置成功并验证通过！")
             elif response:
-                self.gcode.respond_info(f"[{self.bd_name}] 阈值下发成功，但响应未验证: {response}")
+                self._log_info(f"阈值下发成功，但响应未验证: {response}")
             else:
-                self.gcode.respond_info(f"[{self.bd_name}] 阈值下发后未收到响应，可能设置失败")
+                self._log_info(f"阈值下发后未收到响应，可能设置失败")
                 return False
         # I2C模式逻辑不变
         elif "i2c" == self.port:
             self.write_register('probe_thr', self.thrhold)
-            self.gcode.respond_info(f"[{self.bd_name}] 新阈值已写入I2C寄存器！")
+            self._log_info(f"新阈值已写入I2C寄存器！")
         
         return True
 
@@ -233,7 +247,7 @@ class BD_Pressure_Advance:
             self._ensure_usb_connected()
         # 先切换Probe模式，再下发初始阈值
         self.set_probe_mode()
-        if "usb" == self.port:
+        if "usb" in self.port:
             # 显式发送初始阈值
             self.set_threshold(self.thrhold)
         
@@ -353,10 +367,10 @@ class BD_Pressure_Advance:
             self.write_register('pa_probe_mode', 7)
             self.write_register('raw_data_out', 0)
             response = self.read_register('_version', 15).decode('utf-8')
-            self.gcode.respond_info(f".cmd_start {self.port}: {response}") 
+            self._log_info(f".cmd_start {self.port}: {response}") 
 
     def pa_data_process(self, gcmd, str_data):
-        self.gcode.respond_info(f"{self.bd_name}: {str_data}")
+        self._log_info(f"{str_data}")
         if 'R:' in str_data and ',' in str_data:
             R_v = str_data.strip().split('R:')[1].split(',')
             if len(R_v) == 5:                
@@ -388,7 +402,7 @@ class BD_Pressure_Advance:
         
         # 确保串口连接
         if not self._ensure_usb_connected():
-            self.gcode.respond_info(f"[{self.bd_name}] 串口未连接，读取数据失败")
+            self._log_info("串口未连接，读取数据失败")
             return False
                 
         if "usb" == self.port:
@@ -399,7 +413,7 @@ class BD_Pressure_Advance:
                 # 读取所有响应数据
                 response = self.usb.read(self.usb.in_waiting or 1024).decode('utf-8', errors='ignore').strip() 
             except Exception as e:
-                self.gcode.respond_info(f"[{self.bd_name}] 读取数据失败：{str(e)}")
+                self._log_info(f"读取数据失败：{str(e)}")
                 # 重置串口对象，触发下次重连
                 self.usb = None
                 return False
@@ -475,7 +489,7 @@ class BD_Pressure_Advance:
                         break   
                         
             if min_index == len(self.PA_data)-1:
-                self.gcode.respond_info("Calc the best Pressure Advance error!")  
+                self._log_info("Calc the best Pressure Advance error!")  
                 return
                 
             min_r = self.PA_data[-1]   
@@ -484,11 +498,11 @@ class BD_Pressure_Advance:
                     min_r = s_pa
             min_s = min_r      
             
-            self.gcode.respond_info(f"Calc the best Pressure Advance: {min_s[0]}, {min_s[1]} {min_index}")  
+            self._log_info(f"Calc the best Pressure Advance: {min_s[0]}, {min_s[1]} {min_index}")  
             set_pa = f'SET_PRESSURE_ADVANCE ADVANCE={min_s[0]}'
             self.gcode.run_script_from_command(set_pa)
         else:
-            self.gcode.respond_info("No PA calibration data or number is <=5") 
+            self._log_info("No PA calibration data or number is <=5") 
          
     def cmd_reset_probe(self, gcmd):
         if self.toolhead is None:
